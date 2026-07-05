@@ -1,0 +1,24 @@
+.{
+    .name = .game1,
+    .version = "0.0.0",
+    .fingerprint = 0x67f10b8dd86e50d8, // Changing this has security and trust implications.
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .zig_sdl3 = .{
+            .url = "https://github.com/djb724/zig-sdl3/archive/refs/heads/main.tar.gz",
+            .hash = "zig_sdl3-0.0.0-p5pcSYkTAwBgBSffxKcUrWnANca72B8GNv41GODfBNeN",
+        },
+        .vulkan = .{
+            .url = "git+https://github.com/Snektron/vulkan-zig#cea0568d1a5bab102ad0b538d11f2fc734949a1e",
+            .hash = "vulkan-0.0.0-r7Ytx-eDAwBGr8v_cNfrpVWcH1em2lMFbhpzQDAVbVK9",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        // For example...
+        //"LICENSE",
+        //"README.md",
+    },
+}
