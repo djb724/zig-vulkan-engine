@@ -1,8 +1,10 @@
 const std = @import("std");
 const sdl = @import("sdl3");
 const vk = @import("vk.zig");
+const pipeline = @import("triangle_render_pipeline.zig");
 const Instance = vk.InstanceProxy;
 const Device = vk.DeviceProxy;
+const PipelineResources = pipeline.PipelineResources;
 
 const print = std.debug.print;
 
@@ -10,7 +12,12 @@ pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const io = init.io;
 
-    try sdl.init(.{ .audio = true, .events = true, .gamepad = true, .video = true, });
+    try sdl.init(.{
+        .audio = true,
+        .events = true,
+        .gamepad = true,
+        .video = true,
+    });
     defer sdl.quit();
 
     try sdl.vulkanLoadLibrary(null);
@@ -107,7 +114,7 @@ pub fn main(init: std.process.Init) !void {
         });
     }
 
-    const device_handle = try instance.createDevice(selected_device.physical_device, &vk.DeviceCreateInfo {
+    const device_handle = try instance.createDevice(selected_device.physical_device, &vk.DeviceCreateInfo{
         .s_type = .device_create_info,
         .p_next = null,
         .flags = .{},
@@ -124,7 +131,7 @@ pub fn main(init: std.process.Init) !void {
     defer device.destroyDevice(null);
 
     const graphics_queue = device.getDeviceQueue(selected_device.queue_families.graphics, 0);
-    const present_queue = device.getDeviceQueue(selected_device.queue_families.graphics, 0);
+    const present_queue = device.getDeviceQueue(selected_device.queue_families.presentation, 0);
 
     // print("{} - {}\n", .{selected_device.surface_capabilities.min_image_count, selected_device.surface_capabilities.max_image_count});
     var image_count = selected_device.surface_capabilities.min_image_count + 1;
@@ -132,8 +139,13 @@ pub fn main(init: std.process.Init) !void {
         image_count = selected_device.surface_capabilities.max_image_count;
     }
 
+    const swapchain_image_usage = (vk.ImageUsageFlags{
+        .color_attachment_bit = true,
+        .transfer_dst_bit = true,
+    }).intersect(selected_device.surface_capabilities.supported_usage_flags);
+
     // swapchain
-    var swapchain_create_info = vk.SwapchainCreateInfoKHR {
+    var swapchain_create_info = vk.SwapchainCreateInfoKHR{
         .clipped = .true,
         .present_mode = selected_device.present_mode,
         .image_extent = extent,
@@ -143,7 +155,7 @@ pub fn main(init: std.process.Init) !void {
         .composite_alpha = .{ .opaque_bit_khr = true },
         .old_swapchain = .null_handle,
         .pre_transform = selected_device.surface_capabilities.current_transform,
-        .image_usage = .{ .transfer_dst_bit = true },
+        .image_usage = swapchain_image_usage,
         .surface = surface,
         .min_image_count = image_count,
         .image_sharing_mode = .exclusive,
@@ -170,7 +182,7 @@ pub fn main(init: std.process.Init) !void {
         device.destroyImageView(view, null);
     };
     for (swapchain_images, 0..) |image, i| {
-        swapchain_image_views[i] = try device.createImageView(&vk.ImageViewCreateInfo {
+        swapchain_image_views[i] = try device.createImageView(&vk.ImageViewCreateInfo{
             .view_type = .@"2d",
             .format = selected_device.surface_format.format,
             .components = .{
@@ -190,7 +202,7 @@ pub fn main(init: std.process.Init) !void {
         }, null);
     }
 
-    const command_pool = try device.createCommandPool(&vk.CommandPoolCreateInfo {
+    const command_pool = try device.createCommandPool(&vk.CommandPoolCreateInfo{
         .queue_family_index = selected_device.queue_families.graphics,
         .flags = .{
             .reset_command_buffer_bit = true,
@@ -198,8 +210,8 @@ pub fn main(init: std.process.Init) !void {
     }, null);
     defer device.destroyCommandPool(command_pool, null);
 
-    // render pass
-
+    const triangle_render_pipeline = try PipelineResources.helloTrianglePipeline(allocator, io, device, extent, selected_device.surface_format.format);
+    defer triangle_render_pipeline.deinit(device);
 
     // frame buffers and command buffers
     const frame_count: u32 = 2;
@@ -207,14 +219,26 @@ pub fn main(init: std.process.Init) !void {
     const command_buffers = try allocator.alloc(vk.CommandBuffer, frame_count);
     defer allocator.free(command_buffers);
 
-    try device.allocateCommandBuffers(&vk.CommandBufferAllocateInfo {
+    try device.allocateCommandBuffers(&vk.CommandBufferAllocateInfo{
         .command_pool = command_pool,
         .command_buffer_count = 2,
         .level = .primary,
     }, command_buffers.ptr);
 
-    const frame_buffers = try allocator.alloc(vk.Framebuffer, frame_count);
+    const frame_buffers = try allocator.alloc(vk.Framebuffer, image_count);
     defer allocator.free(frame_buffers);
+
+    for (frame_buffers, 0..) |*buf, i| {
+        buf.* = try device.createFramebuffer(&vk.FramebufferCreateInfo{
+            .width = extent.width,
+            .height = extent.height,
+            .layers = 1,
+            .render_pass = triangle_render_pipeline.render_pass,
+            .attachment_count = 1,
+            .p_attachments = &.{swapchain_image_views[i]},
+        }, null);
+    }
+    defer for (frame_buffers) |frame_buffer| device.destroyFramebuffer(frame_buffer, null);
 
     const image_available_semaphores = try allocator.alloc(vk.Semaphore, frame_count);
     defer allocator.free(image_available_semaphores);
@@ -223,7 +247,7 @@ pub fn main(init: std.process.Init) !void {
     }
     defer for (image_available_semaphores) |semaphore| device.destroySemaphore(semaphore, null);
 
-    const render_finished_semaphores = try allocator.alloc(vk.Semaphore, frame_count);
+    const render_finished_semaphores = try allocator.alloc(vk.Semaphore, image_count);
     defer allocator.free(render_finished_semaphores);
     for (render_finished_semaphores) |*semaphore| {
         semaphore.* = try device.createSemaphore(&.{}, null);
@@ -233,16 +257,17 @@ pub fn main(init: std.process.Init) !void {
     const fences = try allocator.alloc(vk.Fence, frame_count);
     defer allocator.free(fences);
     for (fences) |*fence| {
-        fence.* = try device.createFence(&.{}, null);
+        fence.* = try device.createFence(&vk.FenceCreateInfo{
+            .flags = .{ .signaled_bit = true },
+        }, null);
     }
     defer for (fences) |fence| device.destroyFence(fence, null);
-
 
     // main event loop
     const clock = std.Io.Clock.awake;
     const target_fps: f32 = 120.0;
     const target_frame_ns: i96 = @intFromFloat(1_000_000_000.0 / target_fps);
-    
+
     var running = true;
 
     while (running) {
@@ -264,101 +289,74 @@ pub fn main(init: std.process.Init) !void {
         frame_index = @mod(frame_index + 1, frame_count);
         const fence = fences[frame_index];
         const image_available_semaphore = image_available_semaphores[frame_index];
-        const render_finished_semaphore = render_finished_semaphores[frame_index];
-
-        // TODO: proper error handling
-        _ = try device.waitForFences(&.{fence}, .true, 1000000000);
-        try device.resetFences(&.{fence});
-        // TODO: proper error handling
-        const sii_result = try device.acquireNextImageKHR(swapchain, 1000000000, image_available_semaphore, fence);
-        const swapchain_image_index = sii_result.image_index;
-        const swapchain_image = swapchain_images[swapchain_image_index];
-
-        frame_index = @mod(frame_index + 1, frame_count);
         const command_buffer = command_buffers[frame_index];
+
+        _ = try device.waitForFences(&.{fence}, .true, std.math.maxInt(u64));
+        try device.resetFences(&.{fence});
+
+        const sii_result = try device.acquireNextImageKHR(
+            swapchain,
+            std.math.maxInt(u64),
+            image_available_semaphore,
+            .null_handle,
+        );
+        const swapchain_image_index = sii_result.image_index;
+        const frame_buffer = frame_buffers[swapchain_image_index];
+        const render_finished_semaphore = render_finished_semaphores[swapchain_image_index];
 
         try device.resetCommandBuffer(command_buffer, .{});
         try device.beginCommandBuffer(command_buffer, &vk.CommandBufferBeginInfo{
             .p_inheritance_info = null,
         });
 
-        const swapchain_subresource_range = vk.ImageSubresourceRange{
-            .aspect_mask = .{ .color_bit = true },
-            .base_mip_level = 0,
-            .level_count = 1,
-            .base_array_layer = 0,
-            .layer_count = 1,
-        };
-        const clear_color = vk.ClearColorValue{
-            .int_32 = .{ 0, 0, 0, 0 },
-        };
+        device.cmdBeginRenderPass(command_buffer, &vk.RenderPassBeginInfo{
+            .render_pass = triangle_render_pipeline.render_pass,
+            .framebuffer = frame_buffer,
+            .render_area = .{
+                .extent = extent,
+                .offset = .{
+                    .x = 0,
+                    .y = 0,
+                },
+            },
+            .clear_value_count = 1,
+            .p_clear_values = &[_]vk.ClearValue{
+                .{
+                    .color = .{ .float_32 = .{ 0.0, 0.0, 0.0, 1.0 } },
+                },
+            },
+        }, .@"inline");
 
-        device.cmdPipelineBarrier(
-            command_buffer,
-            .{ .top_of_pipe_bit = true },
-            .{ .transfer_bit = true },
-            .{},
-            null,
-            null,
-            &[_]vk.ImageMemoryBarrier{.{
-                .src_access_mask = .{},
-                .dst_access_mask = .{ .transfer_write_bit = true },
-                .old_layout = .undefined,
-                .new_layout = .transfer_dst_optimal,
-                .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-                .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-                .image = swapchain_image,
-                .subresource_range = swapchain_subresource_range,
-            }},
-        );
-        device.cmdClearColorImage(
-            command_buffer,
-            swapchain_image,
-            .transfer_dst_optimal,
-            &clear_color,
-            &.{swapchain_subresource_range},
-        );
-        device.cmdPipelineBarrier(
-            command_buffer,
-            .{ .transfer_bit = true },
-            .{ .bottom_of_pipe_bit = true },
-            .{},
-            null,
-            null,
-            &[_]vk.ImageMemoryBarrier{.{
-                .src_access_mask = .{ .transfer_write_bit = true },
-                .dst_access_mask = .{},
-                .old_layout = .transfer_dst_optimal,
-                .new_layout = .present_src_khr,
-                .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-                .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-                .image = swapchain_image,
-                .subresource_range = swapchain_subresource_range,
-            }},
-        );
+        device.cmdBindPipeline(command_buffer, vk.PipelineBindPoint.graphics, triangle_render_pipeline.pipeline);
+        // device.cmdSetViewport(command_buffer, 0, []vk.Viewport {
+        //     .x = 0.0,
+        //     .y = 0.0,
+        //     .width = @floatFromInt(extent.width),
+        //     .height = @floatFromInt(extent.height),
+        //     .min_depth = 0.0,
+        //     .max_depth = 0.0,
+        // });
+        device.cmdDraw(command_buffer, 3, 1, 0, 0);
+        device.cmdEndRenderPass(command_buffer);
 
         try device.endCommandBuffer(command_buffer);
 
-        // TODO: proper error handling
-        _ = try device.waitForFences(&.{fence}, .true, 1000000000);
-        try device.resetFences(&.{fence});
-        const submit_info: vk.SubmitInfo = .{
+        const wait_stages = [_]vk.PipelineStageFlags{
+            .{ .top_of_pipe_bit = true },
+        };
+        const submit_info = vk.SubmitInfo{
+            .wait_semaphore_count = 1,
+            .p_wait_semaphores = &.{image_available_semaphore},
+            .p_wait_dst_stage_mask = &wait_stages,
             .command_buffer_count = 1,
             .p_command_buffers = &.{command_buffer},
             .signal_semaphore_count = 1,
             .p_signal_semaphores = &.{render_finished_semaphore},
-            .p_wait_semaphores = &.{image_available_semaphore},
-            .wait_semaphore_count = 1,
-            .p_wait_dst_stage_mask = &.{
-                vk.PipelineStageFlags{ .transfer_bit = true },
-            },
         };
-        try device.queueSubmit(graphics_queue, &.{
-            submit_info,
-        }, fence);
+        try device.queueSubmit(graphics_queue, &.{submit_info}, fence);
 
         // TODO: proper error handling
-        _ = try device.queuePresentKHR(present_queue, &vk.PresentInfoKHR {
+        _ = try device.queuePresentKHR(present_queue, &vk.PresentInfoKHR{
             .wait_semaphore_count = 1,
             .p_wait_semaphores = &.{render_finished_semaphore},
             .swapchain_count = 1,
@@ -374,7 +372,7 @@ pub fn main(init: std.process.Init) !void {
         const delta_ms = @as(f64, @floatFromInt(delta.raw.toNanoseconds())) / @as(f64, @floatFromInt(std.time.ns_per_ms));
         const fps = @as(f64, @floatFromInt(std.time.ns_per_s)) / @as(f64, @floatFromInt(delta.raw.toNanoseconds()));
 
-        std.debug.print("  Game Engine | {d:.1} fps | {d:.2} ms\n\x1b[A", .{fps, delta_ms});
+        std.debug.print("  Game Engine | {d:.1} fps | {d:.2} ms\n\x1b[A", .{ fps, delta_ms });
     }
 
     try device.deviceWaitIdle();
@@ -410,7 +408,10 @@ fn getPhysicalDeviceInfo(
     var device_info: PhysicalDeviceInfo = .{
         .physical_device = physical_device,
         .score = 0,
-        .queue_families = .{ .graphics = undefined, .presentation = undefined, },
+        .queue_families = .{
+            .graphics = undefined,
+            .presentation = undefined,
+        },
         .present_mode = undefined,
         .surface_format = undefined,
         .surface_capabilities = undefined,
@@ -422,7 +423,7 @@ fn getPhysicalDeviceInfo(
         else => {
             device_info.score = -1;
             return device_info;
-        }
+        },
     }
 
     const supported_extensions = try instance.enumerateDeviceExtensionPropertiesAlloc(physical_device, null, allocator);
@@ -514,7 +515,6 @@ fn getPhysicalDeviceInfo(
 
     return device_info;
 }
-
 
 fn str_eq(supported: [256]u8, required: [*:0]const u8) bool {
     const required_span = std.mem.span(required);
