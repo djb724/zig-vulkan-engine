@@ -1,10 +1,10 @@
 const std = @import("std");
 const sdl = @import("sdl3");
 const vk = @import("vk.zig");
-const pipeline = @import("triangle_render_pipeline.zig");
+const shaders = @import("shaders.zig");
+const PipelineBuilder = @import("PipelineBuilder.zig");
 const Instance = vk.InstanceProxy;
 const Device = vk.DeviceProxy;
-const PipelineResources = pipeline.PipelineResources;
 
 const print = std.debug.print;
 
@@ -210,8 +210,92 @@ pub fn main(init: std.process.Init) !void {
     }, null);
     defer device.destroyCommandPool(command_pool, null);
 
-    const triangle_render_pipeline = try PipelineResources.helloTrianglePipeline(allocator, io, device, extent, selected_device.surface_format.format);
-    defer triangle_render_pipeline.deinit(device);
+    const dynamic_states = [_]vk.DynamicState{};
+    const viewport = vk.Viewport{
+        .x = 0.0,
+        .y = 0.0,
+        .height = @floatFromInt(extent.height),
+        .width = @floatFromInt(extent.width),
+        .min_depth = 0.0,
+        .max_depth = 1.0,
+    };
+    const viewports = [_]vk.Viewport{viewport};
+    const scissor = vk.Rect2D{
+        .extent = extent,
+        .offset = .{
+            .x = 0,
+            .y = 0,
+        },
+    };
+    const scissors = [_]vk.Rect2D{scissor};
+
+    const layout = try device.createPipelineLayout(&vk.PipelineLayoutCreateInfo{
+        .push_constant_range_count = 0,
+        .p_push_constant_ranges = null,
+        .set_layout_count = 0,
+        .p_set_layouts = null,
+    }, null);
+    defer device.destroyPipelineLayout(layout, null);
+
+    const attachment_ref: vk.AttachmentReference = .{
+        .layout = .color_attachment_optimal,
+        .attachment = 0,
+    };
+    const dependencies: []const vk.SubpassDependency = &.{};
+    const attachments = [_]vk.AttachmentDescription{
+        .{
+            .format = selected_device.surface_format.format,
+            .samples = .{ .@"1_bit" = true },
+            .load_op = .clear,
+            .store_op = .store,
+            .stencil_load_op = .dont_care,
+            .stencil_store_op = .dont_care,
+            .initial_layout = .undefined,
+            .final_layout = .present_src_khr,
+        },
+    };
+    const subpasses: []const vk.SubpassDescription = &.{
+        .{
+            .pipeline_bind_point = .graphics,
+            .color_attachment_count = 1,
+            .p_color_attachments = &.{attachment_ref},
+            .p_depth_stencil_attachment = null,
+            .input_attachment_count = 0,
+            .p_input_attachments = null,
+            .preserve_attachment_count = 0,
+            .p_preserve_attachments = null,
+            .p_resolve_attachments = null,
+        },
+    };
+
+    const render_pass = try device.createRenderPass(&vk.RenderPassCreateInfo{
+        .dependency_count = @intCast(dependencies.len),
+        .p_dependencies = dependencies.ptr,
+        .attachment_count = @intCast(attachments.len),
+        .p_attachments = &attachments,
+        .subpass_count = @intCast(subpasses.len),
+        .p_subpasses = subpasses.ptr,
+    }, null);
+    defer device.destroyRenderPass(render_pass, null);
+
+    const vert_shader = try shaders.loadShader(io, device, "triangle.vert.spv");
+    defer device.destroyShaderModule(vert_shader, null);
+
+    const frag_shader = try shaders.loadShader(io, device, "triangle.frag.spv");
+    defer device.destroyShaderModule(frag_shader, null);
+
+    const graphics_pipeline = try PipelineBuilder.init(allocator, io, device)
+        .with_vertex_shader(vert_shader)
+        .with_fragment_shader(frag_shader)
+        .with_viewports(&viewports)
+        .with_scissors(&scissors)
+        .with_dynamic_states(&dynamic_states)
+        .with_layout(layout)
+        .with_render_pass(render_pass)
+        .with_subpass(0)
+        .with_base_pipeline_index(0)
+        .build();
+    defer device.destroyPipeline(graphics_pipeline, null);
 
     // frame buffers and command buffers
     const frame_count: u32 = 2;
@@ -233,7 +317,7 @@ pub fn main(init: std.process.Init) !void {
             .width = extent.width,
             .height = extent.height,
             .layers = 1,
-            .render_pass = triangle_render_pipeline.render_pass,
+            .render_pass = render_pass,
             .attachment_count = 1,
             .p_attachments = &.{swapchain_image_views[i]},
         }, null);
@@ -310,7 +394,7 @@ pub fn main(init: std.process.Init) !void {
         });
 
         device.cmdBeginRenderPass(command_buffer, &vk.RenderPassBeginInfo{
-            .render_pass = triangle_render_pipeline.render_pass,
+            .render_pass = render_pass,
             .framebuffer = frame_buffer,
             .render_area = .{
                 .extent = extent,
@@ -327,7 +411,7 @@ pub fn main(init: std.process.Init) !void {
             },
         }, .@"inline");
 
-        device.cmdBindPipeline(command_buffer, vk.PipelineBindPoint.graphics, triangle_render_pipeline.pipeline);
+        device.cmdBindPipeline(command_buffer, vk.PipelineBindPoint.graphics, graphics_pipeline);
         // device.cmdSetViewport(command_buffer, 0, []vk.Viewport {
         //     .x = 0.0,
         //     .y = 0.0,
